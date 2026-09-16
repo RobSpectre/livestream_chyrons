@@ -1,0 +1,160 @@
+@import "tailwindcss";
+
+/* Tokens follow neobrutalism.dev: hard black borders, offset black shadows,
+   small radii, heavy weights, flat fills and no gradients.
+   https://www.neobrutalism.dev/docs  (border-border / shadow-shadow / rounded-base) */
+:root {
+  --background: oklch(0 0 0);
+  --foreground: oklch(0 0 0);
+  --card: oklch(0.13 0 0);
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.13 0 0);
+  --popover-foreground: oklch(0.985 0 0);
+  --primary: oklch(0.985 0 0);
+  --primary-foreground: oklch(0.13 0 0);
+  --secondary: oklch(0.985 0 0);
+  --secondary-foreground: oklch(0 0 0);
+  --muted: oklch(0.22 0 0);
+  --muted-foreground: oklch(0.72 0 0);
+  --accent: oklch(0.985 0 0);
+  --accent-foreground: oklch(0 0 0);
+  --destructive: oklch(0.62 0.21 25);
+  --destructive-foreground: oklch(0.985 0 0);
+  /* the library's --border is pure black, drawn on every edge */
+  --border: oklch(0 0 0);
+  --input: oklch(0 0 0);
+  --ring: oklch(0 0 0);
+  --radius: 0.12rem;
+
+  /* Scaled from the library's 2px border / 4px shadow / 5px radius for a 4K source. */
+  --nb-border-width: 0.06rem;
+  --nb-border-chip-width: 0.045rem;
+  --nb-shadow-x: 0.16rem;
+  --nb-shadow-y: 0.16rem;
+  --nb-shadow-chip-x: 0.07rem;
+  --nb-shadow-chip-y: 0.07rem;
+  --nb-radius: 0.12rem;
+  --nb-radius-chip: 0.09rem;
+
+  /* Turn state: block colours with black ink, every one of them above 4.5:1.
+     Green means working, red means it wants a human, grey means nothing is
+     happening. */
+  --state-active: #4ade80;
+  --state-idle: #d4d4d4;
+  --state-attention: #ef4444;
+  --state-ink: #000000;
+  --state-pulse-scale: 1.055;
+  --state-pulse-seconds: 1.7s;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --radius-sm: var(--nb-radius-chip);
+  --radius-md: var(--nb-radius-chip);
+  --radius-lg: var(--nb-radius);
+  --radius-xl: var(--nb-radius);
+  --shadow-shadow: var(--nb-shadow-x) var(--nb-shadow-y) 0 0 var(--border);
+  --shadow-chips: var(--nb-shadow-chip-x) var(--nb-shadow-chip-y) 0 0 var(--border);
+  --spacing-boxShadowX: var(--nb-shadow-x);
+  --spacing-boxShadowY: var(--nb-shadow-y);
+  --font-weight-base: 600;
+  --font-weight-heading: 800;
+}
+
+@layer base {
+  * {
+    border-color: var(--border);
+  }
+  html,
+  body,
+  #app {
+    height: 100%;
+    margin: 0;
+    background: transparent;
+  }
+  body {
+    color: var(--foreground);
+    font-family: "Inter", "DejaVu Sans", system-ui, sans-serif;
+    font-weight: var(--font-weight-base);
+    -webkit-font-smoothing: antialiased;
+    overflow: hidden;
+  }
+}
+
+/* The overlay scales with its OBS browser source: 1rem == 100px at 3840px wide. */
+html {
+  font-size: calc(100vw / 38.4);
+}
+
+@media (max-width: 1200px) {
+  html {
+    font-size: 16px;
+  }
+}
+
+/* Numbers must not jitter while they tick on stream. */
+.tabular {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+}
+
+.pulse-dot {
+  animation: chyron-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes chyron-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.35;
+    transform: scale(0.82);
+  }
+}
+
+/* The turn-state chip breathes when there is something to watch: green while the
+   agent works, red while it waits on a human. Subtle on purpose - it sits in the
+   header of every banner and the stream is compressed. */
+.turn-tone {
+  transform-origin: center;
+}
+
+.turn-pulse {
+  animation: turn-grow var(--state-pulse-seconds) ease-in-out infinite;
+}
+
+@keyframes turn-grow {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(var(--state-pulse-scale));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .turn-pulse {
+    animation: none;
+  }
+}
