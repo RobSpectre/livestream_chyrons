@@ -50,25 +50,31 @@ graph is on the same scale as the numbers beside it.
 Quota is still in the API payload (`metrics.quota`) because the deck keys read
 it, but a chyron no longer shows a quota capsule.
 
-## Turn state: green, grey, red
+## Turn state: purple, grey, red
 
 The `TURN` chip in each banner header is colour-coded, with black ink on the flat
 block colour (`src/lib/turnState.ts` decides, `AgentBanner.vue` renders):
 
 | state | tone | fill | motion |
 | --- | --- | --- | --- |
-| `ACTIVE` | working | green `#4ade80` | grows and shrinks, 1.7s, to 1.055 |
+| `ACTIVE` | working | purple `#c084fc` | grows and shrinks, 1.7s, to 1.055 |
 | `WAITING` | wants a human | red `#ef4444` | grows and shrinks too |
 | `IDLE`, `OFFLINE`, `OPEN`, `—` | nothing happening | grey `#d4d4d4` | still |
 
 The classification is by intent, not an exact match, because the telemetry
 vocabulary (`ACTIVE`/`WAITING`/`IDLE`/`OFFLINE`/`OPEN`) has no failure state yet:
-anything reading as working is green, anything reading as waiting on input or
+anything reading as working is purple, anything reading as waiting on input or
 permission - or broken - is red, and everything else falls back to grey. Unknown
-states go grey on purpose: a wrong green would claim work that is not happening.
+states go grey on purpose: a wrong purple would claim work that is not happening.
 The pulse is a transform, so it never reflows the header, `prefers-reduced-motion`
 switches it off, and the chip carries `data-tone` for the tests. Contrast of black
-on each fill is 12.1:1 green, 5.6:1 red, 14.2:1 grey.
+on each fill is 7.9:1 purple, 5.6:1 red, 14.2:1 grey.
+
+Working reads purple rather than green because the overlay is keyed out with a
+green chroma key: a green chip close to the key loses its saturation to spill
+suppression and gets cut into by the similarity radius, which looks like a
+broken chip on stream. `#c084fc` is far from `#00ff00` in every channel (192/123/
+252 apart), so the keyer leaves the chip alone.
 
 ## Style: neobrutalism
 
@@ -276,8 +282,143 @@ gaps and hidden ones are parked off-canvas. Hiding Codex while Claude and Hermes
 are up moves them to y=40 and y=268 within ~50ms (measured: it is event-driven,
 with a 2s reconcile as a safety net).
 
-That lives in `server/obs_reflow.py`, runs inside the chyron server by default
-(`--no-reflow` turns it off) and reports itself in `/api/health` as `reflow`.
+That layout rule has three possible hosts, and only one should be active at a
+time (two writers over the same transform flicker on stream):
+
+| host | no thread/daemon | config | how fast |
+| --- | --- | --- | --- |
+| `obs/chyrons-reflow.lua` (inside OBS, generated from the Python constants) | yes | one script, added once in Tools -> Scripts | 0.2s |
+| Advanced Scene Switcher macros | yes | nine macros, one per visibility combination | ~0.3s |
+| `server/obs_reflow.py` (the Python service) | no, it is a thread | none | ~50ms |
+
+The Python one lives in `server/obs_reflow.py`, runs inside the chyron server by
+default (`--no-reflow` turns it off) and reports itself in `/api/health` as
+`reflow`. Whatever owns position, the tally's audio gate still works: the server
+polls OBS for visibility whenever its own event subscription is not the thing
+watching (`VISIBILITY_TTL`), so `--no-reflow` does not un-gate the tally.
+
+### Owning the layout with an OBS Lua script
+
+`obs/chyrons-reflow.lua` keeps the banners stacked from inside OBS. It is
+**generated** - edit `server/obs_reflow.py` and re-run
+`python3 scripts/build_obs_script.py`, never the Lua. The layout rule is not
+re-implemented in Lua: the generator emits it as a lookup table built from
+`row_layout()`, so the eight visibility combinations carry exactly the numbers the
+Python reflow and its tests use. Polls every 0.2s on the delta `script_tick()`
+hands it (not on frames), moves only what differs, and only ever writes position -
+OBS keeps owning visibility.
+
+Install it once per scene collection: **Tools -> Scripts -> +** and pick
+
+```
+/media/rspectre/Storage/workspace/nebius/livestream_chyrons/obs/chyrons-reflow.lua
+```
+
+(That path is a per-collection setting, so check the list on any other collection
+you stream. `python3 scripts/build_obs_script.py --out <path>` writes it
+elsewhere if you would rather keep it beside your other scripts.)
+
+**Scope.** The script only ever touches the banner items inside the scene it is
+pointed at, and only their position - nothing else in OBS, in any scene or
+collection. Three settings in **Tools -> Scripts**, saved per scene collection,
+say which scene that is and when it may act:
+
+```
+Scene with the banner items:          [ Chryons            v ]   <- an editable
+                                                                  list of scenes
+[x] Only reflow while that scene is on air
+Only reflow in these scenes (empty = anywhere): [ Livestream - Demo ] [ + ] ...
+```
+
+- **Scene with the banner items** - the picker, the same editable-combo shape the
+  other OBS scripts on this machine use (source-toggler, the visibility mirror),
+  filled from `obs_enum_scenes()`. Editable so a renamed or not-yet-created scene
+  can still be typed. Changing it drops the write cache, so the next tick re-reads
+  every banner.
+- **Only reflow while that scene is on air** - on air means shown in the final mix
+  (`obs_source_active`), so a preview or multiview is not enough and a scene that
+  does not include the picker's scene is not either. A *missing* scene is not
+  treated as off air: it falls through and reports
+  `chyron reflow: waiting for '<scene>' / '<source>'` once, then stays quiet.
+- **Only reflow in these scenes** - the program scene has to be one of them.
+  Empty means anywhere. This is the narrower gate of the two, for keeping the
+  reflow off scenes that do show the banners but where you do not want rows moving
+  under you.
+
+Out of scope, the rows are left exactly as they are, and it is re-checked every
+tick, so the layout settles within one poll (0.2s) of coming back into scope. The
+log says which side it is on:
+
+```
+chyron reflow: active in Chryons
+chyron reflow: paused (program scene is Portrait)
+```
+
+It logs what it does to the OBS log, once per move:
+
+```
+chyron reflow: claude->40 hermes->268
+```
+
+Run the server with `--no-reflow` when this script is registered, so the Python
+reflow is not fighting it for the same transform.
+
+Verification: `tests/test_obs_script.py` regenerates the emitted table and
+compares it against `row_layout()` for every combination and fails if the file on
+disk is stale; `tests/test_obs_script_lua.py` executes the actual Lua against a
+stub of OBS's API (all eight combinations, a settled layout is not rewritten, a
+missing scene moves nothing, the on-air gate holds, the description renders) and
+skips unless `lupa` is installed - OBS embeds its own Lua, so this is only the
+test harness, but it is worth having: it executes the generated file and is the
+only check that catches a Lua syntax error before OBS refuses to load the script
+(`.venv/bin/pip install lupa`).
+
+### Owning the layout with Advanced Scene Switcher instead
+
+An alternative to the Lua script, for when you would rather not have a generated
+file at all: Advanced Scene Switcher
+(installed on this box — 1.32.2 from the distro package, which already has both
+widgets this needs: the `Scene item visibility` condition and the
+`Scene item transform` action with its *Manual transform* mode) reacts to scene
+item visibility itself and moves the sources, so there is no thread, no daemon,
+no long-lived websocket subscription and nothing to restart. Nine mutually
+exclusive macros do it — mutually exclusive on purpose, so exactly one applies at
+a time.
+
+All the conditions are `Scene item visibility` (scene `Chryons`, item
+`Token Chyron - <Agent>`), all the actions are `Scene item transform`
+(scene `Chryons`, the same item, action *Manual transform*) with these values:
+
+| macro | conditions (AND) | transform |
+| --- | --- | --- |
+| Codex row 1 | Codex is visible | `{"pos":{"x":0,"y":40}}` |
+| Codex parked | Codex is not visible | `{"pos":{"x":0,"y":-400}}` |
+| Claude row 2 | Claude is visible, Codex is visible | `{"pos":{"x":0,"y":268}}` |
+| Claude row 1 | Claude is visible, Codex is not visible | `{"pos":{"x":0,"y":40}}` |
+| Claude parked | Claude is not visible | `{"pos":{"x":0,"y":-400}}` |
+| Hermes row 3 | Hermes, Codex and Claude are visible | `{"pos":{"x":0,"y":496}}` |
+| Hermes row 2 (Codex up) | Hermes is visible, Codex is visible, Claude is not visible | `{"pos":{"x":0,"y":268}}` |
+| Hermes row 2 (Claude up) | Hermes is visible, Claude is visible, Codex is not visible | `{"pos":{"x":0,"y":268}}` |
+| Hermes row 1 | Hermes is visible, Codex is not visible, Claude is not visible | `{"pos":{"x":0,"y":40}}` |
+| Hermes parked | Hermes is not visible | `{"pos":{"x":0,"y":-400}}` |
+
+`{"pos":{"x":0,"y":40}}` is a partial transform: OBS keeps every field it does not
+name, and a missing x would be left alone, so spell out both. The numbers are the
+same constants the Python reflow uses (`TOP`, `ROW + GAP`, `PARK_Y`).
+
+**Run the server with `--no-reflow` when OBS owns the layout.** Two writers
+fighting over the same transform flicker on stream: this server's reflow would
+move the rows back on its next reconcile (every 2s, or immediately after a
+visibility event). With `--no-reflow` there is no thread and no event
+subscription, and the tally's audio gate still works because
+`Handler.visibility()` then polls OBS directly (two cached websocket calls, see
+`VISIBILITY_TTL`).
+
+An OBS macro is the only writer, so position changes are instant (~300ms, ASS's
+condition check) and they survive this server being down or restarted. The
+trade-off is the other direction: nine macros to keep in step with `ORDER` and
+the row constants if the layout ever changes, where the Python version is one
+pure function with a unit test.
 
 ## Deck keys: page 1 columns 27-29
 
@@ -428,6 +569,8 @@ server/obs_reflow.py            keeps the Chryons scene stacked from the top;
 scripts/obs_chyrons.py          create/update the Chryons scene, sources, chroma key
 scripts/verify_obs_chyrons.py   check the wiring, measure the reflow, screenshot
 scripts/check_tally_gate.py     live: is the tally silent while off air?
+scripts/build_obs_script.py     generate obs/chyrons-reflow.lua from obs_reflow.py
+obs/chyrons-reflow.lua          GENERATED OBS Lua script: the layout, inside OBS
 scripts/make_deck_icons.py      draw the page-1 chyron toggle key art
 scripts/wire_deck_chyrons.py    point those keys at the chyrons (spec or profile)
 src/App.vue                     chroma surface, banner stack, key switching, tally wiring
