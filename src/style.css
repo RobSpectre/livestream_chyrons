@@ -37,9 +37,13 @@
   --nb-radius-chip: 0.09rem;
 
   /* Turn state: block colours with black ink, every one of them above 4.5:1.
-     Green means working, red means it wants a human, grey means nothing is
-     happening. */
-  --state-active: #4ade80;
+     Purple means working, red means it wants a human, grey means nothing is
+     happening. Working is purple rather than green on purpose: the overlay is
+     keyed out with a green chroma key, and a green chip close to the key gets
+     eaten by the keyer (spill suppression desaturates it and the similarity
+     radius cuts into it), which reads as a broken chip on stream. #c084fc keeps
+     7.9:1 with black ink and sits far from #00ff00 in every channel. */
+  --state-active: #c084fc;
   --state-idle: #d4d4d4;
   --state-attention: #ef4444;
   --state-ink: #000000;
@@ -132,7 +136,7 @@ html {
   }
 }
 
-/* The turn-state chip breathes when there is something to watch: green while the
+/* The turn-state chip breathes when there is something to watch: purple while the
    agent works, red while it waits on a human. Subtle on purpose - it sits in the
    header of every banner and the stream is compressed. */
 .turn-tone {

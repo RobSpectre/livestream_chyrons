@@ -475,7 +475,7 @@ check('the sound follows the drum: one click per flap',
 const audio = await client.eval(`({ state: window.__chyron.tally.state, error: window.__chyron.tally.error })`);
 check('the tally plays without falling over', audio.error === null, JSON.stringify(audio));
 
-// ---- turn-state colour coding: green working, red needing a human, grey idle ----
+// ---- turn-state colour coding: purple working, red needing a human, grey idle ----
 const stateChip = () => client.eval(`(() => {
   const chip = document.querySelector('[data-agent="codex"] [data-role="state"]');
   const style = getComputedStyle(chip);
@@ -508,6 +508,8 @@ const stateChip = () => client.eval(`(() => {
 const dominant = (value) => {
   const [r, g, b] = (value.match(/\d+/g) ?? []).map(Number);
   if (g > r + 30 && g > b + 30) return 'green';
+  // Before the red test: a purple is red-dominant over green too (192,132,252).
+  if (b > g + 40 && r > g + 20) return 'purple';
   if (r > g + 40 && r > b + 40) return 'red';
   if (Math.max(r, g, b) - Math.min(r, g, b) < 18) return 'grey';
   return `other(${r},${g},${b})`;
@@ -533,8 +535,8 @@ const chips = {
   failed: await withActivity('FAILED'),
   idle: await withActivity('IDLE'),
 };
-check('an active turn is a green chip with black ink',
-  chips.active.tone === 'active' && dominant(chips.active.background) === 'green',
+check('an active turn is a purple chip with black ink',
+  chips.active.tone === 'active' && dominant(chips.active.background) === 'purple',
   `${chips.active.text} tone=${chips.active.tone} ${chips.active.background} on ${chips.active.ink}`);
 check('the active chip pulses',
   chips.active.running && chips.active.animation.startsWith('turn-grow'),
@@ -560,6 +562,13 @@ for (const quiet of ['OFFLINE', 'OPEN', '—']) {
 check('the tone colours carry black ink at readable contrast',
   Object.values(chips).every((chip) => contrast(chip.ink, chip.background) >= 4.5),
   Object.entries(chips).map(([k, c]) => `${k} ${contrast(c.ink, c.background).toFixed(1)}:1`).join(' '));
+
+// The state fills were the one part of the palette this harness never measured
+// against the key, and a green working-chip sat close enough to #00ff00 to be
+// keyed out on stream. Every tone has to clear the same distance as the blocks.
+check('no tone fill can be confused with the chroma key',
+  Object.values(chips).every((chip) => distance(chip.background, 'rgb(0, 255, 0)') > 60),
+  Object.entries(chips).map(([k, c]) => `${k} ${c.background} d=${distance(c.background, 'rgb(0, 255, 0)')}`).join(' '));
 
 // The chip grows and shrinks; it must not grow out of the banner frame.
 await withActivity('ACTIVE');

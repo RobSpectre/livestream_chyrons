@@ -11,7 +11,7 @@ const activity = computed(() => props.banner.metrics.activity?.value?.toUpperCas
 // Off-air states are the only ones worth spelling out; on-air the colour says it.
 const status = computed(() => (props.demo ? "DEMO" : props.offline ? "NO SERVER" : activity.value))
 
-// Green working, red wanting a human, grey otherwise - the chip's fill, with black
+// Purple working, red wanting a human, grey otherwise - the chip's fill, with black
 // ink on it. "NO SERVER" and "DEMO" read as grey, which is honest: neither is work.
 const tone = computed(() => turnTone(props.demo ? "DEMO" : props.offline ? "no server" : activity.value))
 const toneColour = computed(() => TONE_COLOUR[tone.value])

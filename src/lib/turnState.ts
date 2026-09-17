@@ -3,11 +3,11 @@
  *
  * The telemetry vocabulary is `ACTIVE`, `WAITING`, `IDLE`, `OFFLINE` and `OPEN`,
  * and there is no failure token in it yet, so this classifies by intent rather
- * than by exact match: anything that reads as "working" is green, anything that
+ * than by exact match: anything that reads as "working" is purple, anything that
  * reads as "wants a human" - a pending approval, a prompt, a failure - is red,
  * and everything else (idle, offline, a CLI open with no session, a placeholder,
  * a state we have never seen) is grey. An unknown state falling back to grey is
- * deliberate: a wrong green would claim work that is not happening.
+ * deliberate: a wrong purple would claim work that is not happening.
  */
 export type TurnTone = 'active' | 'idle' | 'attention'
 
@@ -31,7 +31,7 @@ export const TONE_COLOUR: Record<TurnTone, string> = {
   attention: 'var(--state-attention)',
 }
 
-/** Green and red pulse; grey sits still, because nothing is happening. */
+/** Purple and red pulse; grey sits still, because nothing is happening. */
 export function tonePulses(tone: TurnTone): boolean {
   return tone !== 'idle'
 }
