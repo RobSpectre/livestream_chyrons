@@ -1,5 +1,7 @@
 """Tests for the OBS reflow layout (pure functions, no OBS needed)."""
+import contextlib
 import importlib.util
+import io
 from pathlib import Path
 import sys
 import unittest
@@ -152,6 +154,125 @@ class VisibilityTests(unittest.TestCase):
         self.assertFalse(status['visibility']['on_air'])
         self.assertEqual(status['visibility']['agents'],
                          {'codex': False, 'claude': True, 'hermes': False})
+
+
+class LoggingMustNotKillTheLoopTests(unittest.TestCase):
+    """A logger that fails must not be able to stop the layout service.
+
+    Regression: the server was launched from a terminal that has since closed, so
+    its stdout is a pipe with no reader and ``print`` raises BrokenPipeError. The
+    move-logging call let that escape ``run()`` and killed the reflow thread:
+    /api/health froze on ``state: error``, and a chyron the deck key switched on
+    afterwards stayed parked at y=-400 - on the deck it looked like a key that
+    did nothing, and on stream the banner never appeared.
+    """
+
+    def test_the_default_logger_survives_a_dead_stdout(self):
+        class DeadPipe(io.TextIOBase):
+            def write(self, _text):
+                raise BrokenPipeError(32, 'Broken pipe')
+
+            def flush(self):
+                raise BrokenPipeError(32, 'Broken pipe')
+
+        with contextlib.redirect_stdout(DeadPipe()):
+            reflow._safe_log('chyron reflow: Codex->40')  # must not raise
+
+    def test_a_logger_that_raises_does_not_escape_run(self):
+        calls = []
+        service = reflow.Reflow(log=lambda *_: (_ for _ in ()).throw(BrokenPipeError(32, 'Broken pipe')),
+                                retry_seconds=0.01)
+
+        def serve():
+            calls.append(1)
+            if len(calls) >= 3:
+                service.stop.set()
+            raise RuntimeError('OBS went away')
+
+        service.serve = serve
+        service.run()  # returns only if the loop survived three failures
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(service.state, 'error')
+        self.assertIn('OBS went away', service.error)
+
+    def test_a_flaky_socket_does_not_stop_the_reconnect_loop(self):
+        calls = []
+        service = reflow.Reflow(log=lambda *_: None, retry_seconds=0.01)
+
+        def serve():
+            calls.append(1)
+            if len(calls) >= 2:
+                service.stop.set()
+                return
+            raise ConnectionResetError('socket closed')
+
+        service.serve = serve
+        service.run()
+        self.assertEqual(len(calls), 2)
+
+    def test_the_move_log_cannot_take_down_apply(self):
+        service = reflow.Reflow(log=lambda *_: (_ for _ in ()).throw(BrokenPipeError(32, 'Broken pipe')))
+        items = [item('Token Chyron - Codex', True, reflow.PARK_Y, 1)]
+        self.assertEqual(service.apply(FakeClient(items)), 1)
+        self.assertEqual(service.moves, 1)
+
+
+class VisibilitySnapshotTests(unittest.TestCase):
+    """The tally's audio gate when nothing is subscribed to OBS events.
+
+    With the layout owned by an OBS macro (Advanced Scene Switcher) this process
+    has no event subscription, so visibility is polled instead. The rule that
+    matters does not change: unknown means audible.
+    """
+
+    class FakeClient:
+        def __init__(self, items, on_air=True, fail=False):
+            self.items, self.on_air, self.fail = items, on_air, fail
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def get_scene_item_list(self, scene):
+            if self.fail:
+                raise ConnectionResetError('socket closed')
+            return SimpleNamespace(scene_items=self.items)
+
+        def get_source_active(self, scene):
+            return SimpleNamespace(video_showing=self.on_air)
+
+    def factory(self, **kwargs):
+        client = self.FakeClient(**kwargs)
+        return lambda config: client
+
+    def test_reports_each_chyron_and_air_state(self):
+        items = [item('Token Chyron - Codex', True, reflow.TOP, 1),
+                 item('Token Chyron - Claude', False, reflow.PARK_Y, 2),
+                 item('Token Chyron - Hermes', True, reflow.TOP + reflow.ROW + reflow.GAP, 3)]
+        snap = reflow.visibility_snapshot({'host': 'x'}, client_factory=self.factory(items=items, on_air=False))
+        self.assertFalse(snap['on_air'])
+        self.assertEqual(snap['agents'], {'codex': True, 'claude': False, 'hermes': True})
+
+    def test_a_broken_obs_leaves_the_tally_audible(self):
+        snap = reflow.visibility_snapshot({'host': 'x'}, client_factory=self.factory(items=[], fail=True))
+        self.assertTrue(snap['on_air'])
+        self.assertEqual(snap['agents'], {a: True for a in reflow.ORDER})
+
+    def test_no_config_means_audible(self):
+        snap = reflow.visibility_snapshot(None, client_factory=self.factory(items=[]))
+        self.assertEqual(snap['agents'], {a: True for a in reflow.ORDER})
+
+    def test_an_obs_without_get_source_active_still_reports_agents(self):
+        class NoOnAir(self.FakeClient):
+            def get_source_active(self, scene):
+                raise RuntimeError('GetSourceActive is not supported')
+
+        client = NoOnAir([item('Token Chyron - Codex', False, reflow.PARK_Y, 1)])
+        snap = reflow.visibility_snapshot({'host': 'x'}, client_factory=lambda config: client)
+        self.assertTrue(snap['on_air'])
+        self.assertFalse(snap['agents']['codex'])
 
 
 if __name__ == '__main__':

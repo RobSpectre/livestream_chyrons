@@ -253,6 +253,81 @@ class VisibilityHttpTests(unittest.TestCase):
         self.assertTrue(visibility['on_air'])
         self.assertEqual(set(visibility['agents']), set(server.AGENTS))
 
+    def test_visibility_is_polled_when_an_obs_macro_owns_the_layout(self):
+        """--no-reflow: no event subscription here, so ask OBS instead.
+
+        Without this the audio gate would fall back to "everything audible" and
+        the tally would keep clicking while its chyron is off screen.
+        """
+        polled = {'on_air': True, 'agents': {'codex': False, 'claude': True, 'hermes': False}}
+        calls = []
+        original = server.visibility_snapshot
+        setattr(server, 'visibility_snapshot', lambda config: (calls.append(config), polled)[1])
+        handler = type('Handler', (server.Handler,),
+                       {'snapshot': self.snapshot, 'dist': ROOT / 'dist', 'reflow': None,
+                        'reflow_config': {'host': '127.0.0.1', 'port': 4455},
+                        'visibility_cache': (0.0, None)})
+        httpd = ThreadingHTTPServer(('127.0.0.1', 0), handler)
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        try:
+            with urllib.request.urlopen(f'http://127.0.0.1:{httpd.server_port}/api/telemetry',
+                                        timeout=10) as response:
+                visibility = json.loads(response.read())['visibility']
+        finally:
+            setattr(server, 'visibility_snapshot', original)
+            httpd.shutdown()
+            httpd.server_close()
+        self.assertEqual(visibility['agents'], polled['agents'])
+        self.assertEqual(calls, [{'host': '127.0.0.1', 'port': 4455}])
+
+    def test_a_polled_answer_is_reused_within_its_ttl(self):
+        """The SSE slice loop asks every slice: do not connect to OBS per slice."""
+        calls = []
+        original = server.visibility_snapshot
+        setattr(server, 'visibility_snapshot',
+                lambda config: (calls.append(1), {'on_air': True,
+                                                  'agents': {a: True for a in server.AGENTS}})[1])
+        handler = type('Handler', (server.Handler,),
+                       {'snapshot': self.snapshot, 'dist': ROOT / 'dist', 'reflow': None,
+                        'reflow_config': {'host': '127.0.0.1', 'port': 4455},
+                        'visibility_cache': (0.0, None)})
+        httpd = ThreadingHTTPServer(('127.0.0.1', 0), handler)
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        try:
+            for _ in range(5):
+                with urllib.request.urlopen(f'http://127.0.0.1:{httpd.server_port}/api/telemetry',
+                                            timeout=10) as response:
+                    response.read()
+        finally:
+            setattr(server, 'visibility_snapshot', original)
+            httpd.shutdown()
+            httpd.server_close()
+        self.assertEqual(len(calls), 1, 'five requests inside the TTL poll OBS once')
+
+    def test_a_reflow_in_error_falls_back_to_the_poll(self):
+        """A dead event subscription must not silently un-gate the tally."""
+        polled = {'on_air': False, 'agents': {a: True for a in server.AGENTS}}
+        original = server.visibility_snapshot
+        setattr(server, 'visibility_snapshot', lambda config: polled)
+        broken = StubReflow()
+        broken.state = 'error'
+        broken.visibility = {'on_air': True, 'agents': {a: True for a in server.AGENTS}}
+        handler = type('Handler', (server.Handler,),
+                       {'snapshot': self.snapshot, 'dist': ROOT / 'dist', 'reflow': broken,
+                        'reflow_config': {'host': '127.0.0.1', 'port': 4455},
+                        'visibility_cache': (0.0, None)})
+        httpd = ThreadingHTTPServer(('127.0.0.1', 0), handler)
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        try:
+            with urllib.request.urlopen(f'http://127.0.0.1:{httpd.server_port}/api/telemetry',
+                                        timeout=10) as response:
+                visibility = json.loads(response.read())['visibility']
+        finally:
+            setattr(server, 'visibility_snapshot', original)
+            httpd.shutdown()
+            httpd.server_close()
+        self.assertFalse(visibility['on_air'])
+
     def test_a_test_browser_cannot_masquerade_as_the_audio_source(self):
         """A browser playing tallies on the harness must not hide the real source."""
         self.post_tally({'page': 'banner', 'plays': 5, 'state': 'running', 'volume': 0.14})

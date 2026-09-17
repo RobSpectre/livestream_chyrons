@@ -28,6 +28,23 @@ ROW = 220                           # canvas height of one chyron source
 GAP = 8                             # canvas pixels between stacked chyrons
 PARK_Y = -400                       # off-canvas resting place for hidden chyrons
 RECONCILE_SECONDS = 2.0
+RETRY_SECONDS = 5.0                 # wait between reconnect attempts
+
+
+def _safe_log(*parts):
+    """Default logger: a log line must never be able to stop the layout.
+
+    A server started from a terminal that has since closed writes to a pty with
+    no reader, so ``print`` raises BrokenPipeError. That exception used to come
+    out of the move-logging call, escape ``run()`` and kill the reflow thread
+    outright - after which a chyron switched back on stayed parked off-canvas at
+    y=-400 and never appeared on stream, while ``/api/health`` froze on
+    ``state: error``. Logging is diagnostics: it degrades, it never fails.
+    """
+    try:
+        print(*parts, flush=True)
+    except OSError:  # BrokenPipeError, EIO on a dead pty, ...
+        pass
 
 
 def row_layout(visible, top=TOP, row=ROW, gap=GAP, park=PARK_Y):
@@ -60,14 +77,49 @@ def websocket_config(env=None, home=None):
             'password': config.get('server_password', ''), 'timeout': 5}
 
 
+def _req_client(config):
+    import obsws_python as obs
+    return obs.ReqClient(**config)
+
+
+def visibility_snapshot(config, scene=SCENE, client_factory=None):
+    """Read on-air and per-chyron visibility from OBS in one shot.
+
+    The tally's audio gate needs to know what is on screen. When the layout is
+    owned somewhere else - an OBS macro does the positioning, or this file's
+    Reflow is between reconnects - nothing in this process is subscribed to OBS
+    events, so ask OBS directly instead. Unknown means audible: a missing config,
+    a closed OBS or a dead socket returns the permissive default rather than
+    silencing the stream by accident.
+    """
+    permissive = {'on_air': True, 'agents': {agent: True for agent in ORDER}}
+    if not config:
+        return permissive
+    try:
+        factory = client_factory or _req_client
+        with factory(config) as client:
+            items = client.get_scene_item_list(scene).scene_items
+            agents = {agent: any(i['sourceName'] == name and i['sceneItemEnabled']
+                                 for i in items)
+                      for agent, name in SOURCE_NAMES.items()}
+            try:
+                on_air = bool(client.get_source_active(scene).video_showing)
+            except Exception:  # noqa: BLE001 - older OBS, or the scene was renamed
+                on_air = True
+            return {'on_air': on_air, 'agents': agents}
+    except Exception:  # noqa: BLE001 - OBS closed, websocket down, auth changed
+        return permissive
+
+
 class Reflow:
     """Event-driven, with a slow reconcile as a safety net for missed events."""
 
-    def __init__(self, scene=SCENE, lock_path=None, log=print):
+    def __init__(self, scene=SCENE, lock_path=None, log=_safe_log, retry_seconds=RETRY_SECONDS):
         self.scene = scene
         self.lock_path = lock_path
         self.config = None
         self.log = log
+        self.retry_seconds = retry_seconds
         self.state = 'off'
         self.error = None
         self.positions = {}
@@ -105,6 +157,17 @@ class Reflow:
         threading.Thread(target=self.run, daemon=True).start()
         return self
 
+    def _log(self, *parts):
+        """Route every log line through here: a logger must never break layout.
+
+        ``_safe_log`` covers the default print-to-a-dead-pty case; this covers a
+        logger someone injects, so neither can take the thread down.
+        """
+        try:
+            self.log(*parts)
+        except Exception:  # noqa: BLE001 - diagnostics, never fatal
+            pass
+
     def run(self):
         while not self.stop.is_set():
             try:
@@ -112,8 +175,8 @@ class Reflow:
             except Exception as error:  # noqa: BLE001 - reported through status()
                 self.state = 'error'
                 self.error = f'{type(error).__name__}: {error}'
-                self.log(f'chyron reflow: {self.error}')
-                self.stop.wait(5)
+                self._log(f'chyron reflow: {self.error}')
+                self.stop.wait(self.retry_seconds)
 
     def serve(self):
         import obsws_python as obs
@@ -128,13 +191,17 @@ class Reflow:
             try:
                 self.state = 'running'
                 self.error = None
+                self._log('chyron reflow: connected to OBS')
                 while not self.stop.is_set():
                     self.apply(client)
                     # Sleep until an event wakes us, or until the reconcile tick.
                     self.wake.wait(RECONCILE_SECONDS)
                     self.wake.clear()
             finally:
-                events.disconnect()
+                try:
+                    events.disconnect()
+                except Exception:  # noqa: BLE001 - a dead socket still has to reconnect
+                    pass
 
     def on_air(self, client):
         """Is the Chryons scene rendered right now? Unknown means "yes"."""
@@ -164,7 +231,7 @@ class Reflow:
         for name, (_, position) in plan.items():
             short = name.rsplit(' ', 1)[-1]
             moved.append(f'{short}->{int(position)}')
-        self.log('chyron reflow: ' + ' '.join(moved))
+        self._log('chyron reflow: ' + ' '.join(moved))
         return len(plan)
 
     def scene_lock(self):

@@ -27,7 +27,7 @@ DIST = ROOT / 'dist'
 sys.path.insert(0, str(STREAMDECK))
 sys.path.insert(0, str(ROOT / 'server'))  # agent_extras, obs_reflow: importable by path too
 from agent_extras import Extras  # noqa: E402  (after the path setup above)
-from obs_reflow import Reflow, websocket_config  # noqa: E402
+from obs_reflow import Reflow, visibility_snapshot, websocket_config  # noqa: E402
 
 # Page 6 metric order: turn state, tokens/sec, context left, session, 30-day, quota.
 # `quota` stays in the payload (the deck keys still use it) even though the chyron
@@ -41,6 +41,10 @@ AGENTS = ('codex', 'claude', 'hermes')
 # the chyrons silences the tally within ~100ms instead of up to a second.
 STREAM_SLICE_SECONDS = 0.1
 STREAM_SLICES = 10
+# How long a polled visibility answer is reused. The SSE loop asks every slice,
+# and the pages poll about once a second, so this keeps OBS calls to a handful
+# per second while still noticing a scene switch within a quarter second.
+VISIBILITY_TTL = 0.25
 BRANDS = {
     # accent = block colour of the chips and capsules, tint = the light card the
     # blocks sit on (the library's light-card idiom: black frames and hard black
@@ -162,6 +166,10 @@ class Handler(BaseHTTPRequestHandler):
     snapshot = None
     dist = DIST
     reflow = None
+    # OBS websocket config used when nothing is subscribed to its events; see
+    # Handler.visibility().
+    reflow_config: dict | None = None
+    visibility_cache: tuple[float, dict | None] = (0.0, None)
     # Last audio report from the page playing the tally, per page identity, so an
     # operator (and the test suite) can see whether OBS's embedded browser is
     # actually running the audio graph rather than leaving it suspended. The
@@ -221,9 +229,17 @@ class Handler(BaseHTTPRequestHandler):
     def visibility(self):
         # type(self), not Handler: a subclass must be able to stand in for it.
         reflow = type(self).reflow
-        if reflow is None:
-            return {'on_air': True, 'agents': {a: True for a in AGENTS}}
-        return dict(reflow.visibility)
+        if reflow is not None and getattr(reflow, 'state', 'off') == 'running':
+            return dict(reflow.visibility)
+        # Nothing here is subscribed to OBS events any more - the layout may be
+        # owned by an OBS macro, or the reflow may be between reconnects - so ask
+        # OBS directly. Cached briefly because the SSE loop asks every slice.
+        at, cached = type(self).visibility_cache
+        now = time.monotonic()
+        if cached is None or now - at > VISIBILITY_TTL:
+            cached = visibility_snapshot(type(self).reflow_config)
+            type(self).visibility_cache = (now, cached)
+        return dict(cached)
 
     def telemetry(self):
         """Snapshot plus live visibility, so the tally knows what is on screen.
@@ -305,13 +321,20 @@ def main():
     Handler.snapshot = Snapshot(streamdeck=STREAMDECK,
                                 enabled=[a.strip() for a in args.agents.split(',') if a.strip()])
     Handler.dist = Path(args.dist)
+    # Always read the websocket config: even with the reflow off (the layout may
+    # be owned by an OBS macro), Handler.visibility() polls OBS with it so the
+    # tally's audio gate still knows what is on screen.
+    config = websocket_config()
+    Handler.reflow_config = config
     if not args.no_reflow:
-        config = websocket_config()
         if config:
             lock = STREAMDECK / '.obs-background.lock'
             Handler.reflow = Reflow(lock_path=lock if STREAMDECK.is_dir() else None).start(config)
         else:
             print('chyron reflow: no OBS websocket config found, disabled', flush=True)
+    elif config:
+        print('chyron reflow: off (positions owned elsewhere); '
+              'visibility polled for the tally gate', flush=True)
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f'chyrons overlay on http://{args.host}:{args.port}/  (api: /api/telemetry)', flush=True)
     try:
